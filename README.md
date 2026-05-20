@@ -49,13 +49,16 @@ gh repo create open-loops --private --push
 3. Framework preset: **Next.js** (auto-detected)
 4. Click **Deploy**
 
-### Step 3: Create a KV Database
+### Step 3: Add an Upstash Redis database
 
-1. In your Vercel project → **Storage** tab → **Create Database**
-2. Choose **KV** → name it anything → click **Create**
-3. Go to the KV database → **.env.local** tab
-4. Click **Copy Snippet** — this gives you `KV_REST_API_URL` and `KV_REST_API_TOKEN`
-5. In your project → **Settings** → **Environment Variables** → paste both
+Vercel KV was deprecated. The replacement is Upstash Redis, available free from the Vercel Marketplace.
+
+1. In your Vercel project → **Integrations** tab → search **Upstash** → **Add Integration**
+2. Connect your Upstash account (or create one — free tier is fine)
+3. Create a Redis database, attach it to your project
+4. Vercel will automatically add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to your project's environment variables
+
+Alternatively, create the database at [console.upstash.com](https://console.upstash.com) and paste the two env vars manually into **Project Settings → Environment Variables**.
 
 Redeploy once after adding the env vars.
 
@@ -69,7 +72,7 @@ Visit `https://your-app.vercel.app/api/export` — you should see JSON with the 
 
 ```bash
 cp .env.local.example .env.local
-# Fill in KV_REST_API_URL and KV_REST_API_TOKEN from the Vercel KV dashboard
+# Fill in UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN from console.upstash.com
 
 npm install
 npm run dev
