@@ -1,7 +1,10 @@
 import { Redis } from '@upstash/redis'
 
-// Redis.fromEnv() reads UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
-const redis = Redis.fromEnv()
+// Supports both Upstash-native env vars and the KV_ names injected by Vercel's Upstash integration
+const redis = new Redis({
+  url: (process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL)!,
+  token: (process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN)!,
+})
 
 export interface Loop {
   id: string
