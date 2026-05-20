@@ -1,248 +1,484 @@
 """
-The Note - Morning Agent
-========================
-Reads open loop data, picks the highest priority open loop,
-and displays it as a sticky note at a random screen position.
-Click the note to dismiss it.
+agent.py  -  The Note  (v2)
+Morning sticky note from your open loops.
 
-Data source (tried in order):
-  1. VERCEL_URL/api/export  — fetched over HTTP (no local file needed)
-  2. OPEN_LOOPS_PATH        — local JSON file (fallback / offline mode)
+Features:
+  • Warm, maternal greeting with text emoji — changes daily
+  • Day-of-week color themes (7 palettes)
+  • Draggable window (click + drag anywhere on the header)
+  • Resizable via bottom-right corner grip
+  • Expandable step-by-step breakdown of the action item
+  • Category-aware "how to start" hints
+  • × close button only — no accidental dismiss
+  • Segoe UI for warmth, Consolas for task text
 
-Setup:
-  1. Set VERCEL_URL to your deployed app (e.g. https://open-loops.vercel.app)
-     OR set OPEN_LOOPS_PATH to a local open_loops.json export
-  2. Schedule with Windows Task Scheduler (see README)
+Configure the two lines below, then run:
+    python agent.py
+
+Schedule with Windows Task Scheduler for automatic morning delivery.
 """
 
 import json
 import os
 import random
-import sys
 import tkinter as tk
-from tkinter import font as tkfont
-from pathlib import Path
 from datetime import datetime
-from urllib.request import urlopen
 from urllib.error import URLError
+from urllib.request import urlopen
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Set this to your Vercel deployment URL (no trailing slash).
-# Example: "https://open-loops.vercel.app"
-# Leave as empty string to skip HTTP fetch and use local file only.
-VERCEL_URL = ""
-
-# Local file fallback — used when VERCEL_URL is empty or unreachable.
-OPEN_LOOPS_PATH = os.path.expanduser("~/Documents/open_loops.json")
-
-# HTTP request timeout in seconds
+# ── Configuration ──────────────────────────────────────────────────────────────
+VERCEL_URL = "https://open-loop-xi.vercel.app"          # your deployed app
+OPEN_LOOPS_PATH = os.path.expanduser("~/Documents/open_loops.json")  # local fallback
 HTTP_TIMEOUT = 8
+# ───────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Sticky note dimensions
-NOTE_WIDTH  = 340
-NOTE_HEIGHT = 160
+# ── Color themes — one per weekday (Mon=0 … Sun=6) ────────────────────────────
+DAY_THEMES = {
+    0: {"bg": "#fff8e7", "header": "#fce4a0", "accent": "#d4820a", "text": "#3a2a00", "label": "Monday"},   # warm amber
+    1: {"bg": "#eaf4f4", "header": "#b2dada", "accent": "#2a7d7d", "text": "#0d2e2e", "label": "Tuesday"},  # sage teal
+    2: {"bg": "#fff0f5", "header": "#f7c5d8", "accent": "#c2185b", "text": "#3a0020", "label": "Wednesday"},# rose pink
+    3: {"bg": "#f0f4ff", "header": "#b8caff", "accent": "#3949ab", "text": "#0d1440", "label": "Thursday"}, # periwinkle
+    4: {"bg": "#f0fff4", "header": "#a8e6c0", "accent": "#2e7d52", "text": "#0a2a18", "label": "Friday"},   # mint green
+    5: {"bg": "#fdf4ff", "header": "#d4b8f7", "accent": "#7b1fa2", "text": "#280040", "label": "Saturday"}, # lavender
+    6: {"bg": "#fff4ee", "header": "#f7c8a8", "accent": "#bf4d00", "text": "#3a1400", "label": "Sunday"},   # peach coral
+}
 
-# Padding from screen edges
-EDGE_PADDING = 60
+# ── Morning greetings — rotated randomly ──────────────────────────────────────
+GREETINGS = [
+    "Good morning. You've got this. :)",
+    "Hey you, rise and shine. Today's yours. :)",
+    "Morning! One thing at a time, okay? :)",
+    "You showed up. That already counts. :)",
+    "Good morning. Small steps, big things. :)",
+    "Hey sunshine. Let's make today count. :)",
+    "Morning. Be gentle with yourself today. :)",
+    "You're doing better than you think. :)",
+    "Good morning. One focused hour can change everything. :)",
+    "Hi there. Start soft, finish strong. :)",
+]
 
-# Colors
-BG_COLOR     = "#F5E642"
-BG_SHADOW    = "#E8D93A"
-TEXT_COLOR   = "#1a1a1a"
-META_COLOR   = "#5a5000"
-DISMISS_COLOR = "#8a7a00"
+# ── Category hints — "how to start" ──────────────────────────────────────────
+CATEGORY_HINTS = {
+    "SHIP":     "→ Open the file. Write one line. Ship it.",
+    "BUILD":    "→ Pick the smallest working piece and build that first.",
+    "SPEC":     "→ Write one sentence of the spec. That's step one.",
+    "DECIDE":   "→ List your two options. Pick the less scary one.",
+    "RESEARCH": "→ Set a timer for 20 min. Read, take one note, stop.",
+}
+DEFAULT_HINT = "→ Take one concrete action in the next five minutes."
 
-# ─────────────────────────────────────────────────────────────────────────────
 
+# ── Data loading ───────────────────────────────────────────────────────────────
 
 def fetch_loops_http(base_url: str) -> list | None:
-    """
-    Try to fetch open loops from the Vercel API endpoint.
-    Returns a list of loop dicts on success, None on any failure.
-    """
     url = base_url.rstrip("/") + "/api/export"
     try:
         with urlopen(url, timeout=HTTP_TIMEOUT) as response:
-            raw = response.read().decode("utf-8")
-            data = json.loads(raw)
+            data = json.loads(response.read().decode("utf-8"))
             loops = data.get("loops", [])
-            # /api/export already filters to open loops only
             return sorted(loops, key=lambda x: x.get("priority", 0), reverse=True)
-    except (URLError, json.JSONDecodeError, KeyError, Exception):
+    except (URLError, json.JSONDecodeError, Exception):
         return None
 
 
 def load_loops_local(path: str) -> list:
-    """
-    Load loops from a local open_loops.json file.
-    Returns a (possibly empty) list of loop dicts.
-    """
-    p = Path(path)
-    if not p.exists():
-        return []
     try:
-        with open(p, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        loops = data.get("loops", [])
-        open_loops = [l for l in loops if l.get("status") == "open"]
+        loops = data if isinstance(data, list) else data.get("loops", [])
+        open_loops = [l for l in loops if l.get("status", "open") == "open"]
         return sorted(open_loops, key=lambda x: x.get("priority", 0), reverse=True)
-    except (json.JSONDecodeError, KeyError):
+    except (FileNotFoundError, json.JSONDecodeError, Exception):
         return []
 
 
 def load_loops() -> list:
-    """
-    Load loops using the configured data source(s).
-    Tries HTTP first (if VERCEL_URL is set), falls back to local file.
-    """
     if VERCEL_URL:
         loops = fetch_loops_http(VERCEL_URL)
         if loops is not None:
             return loops
-        # HTTP failed — fall through to local file
-        print(f"[agent] HTTP fetch failed, trying local file: {OPEN_LOOPS_PATH}", file=sys.stderr)
-
     return load_loops_local(OPEN_LOOPS_PATH)
 
 
-def pick_loop(loops: list) -> dict | None:
-    """
-    Priority function: select today's action item.
+def score_loop(loop: dict) -> float:
+    base = float(loop.get("priority", 1))
+    category_bonus = {"SHIP": 2.0, "DECIDE": 1.5, "SPEC": 1.0, "BUILD": 0.5, "RESEARCH": 0.0}
+    cat = loop.get("category", "").upper()
+    bonus = category_bonus.get(cat, 0.0)
+    try:
+        imported = datetime.fromisoformat(loop.get("importedAt", datetime.now().isoformat()))
+        age_days = (datetime.now() - imported).days
+        age_bonus = min(age_days * 0.5, 3.0)
+    except Exception:
+        age_bonus = 0.0
+    return base + bonus + age_bonus
 
-    Scoring weights:
-      - Priority field (1-5): primary signal
-      - Category bonus: SHIP > DECIDE > SPEC > BUILD > RESEARCH
-        (things closest to done surface first)
-      - Age bonus: loops older than 3 days get +0.5 per day (capped at +3)
-        (prevents things rotting indefinitely)
-    """
+
+def pick_top_loop(loops: list) -> dict | None:
     if not loops:
         return None
-
-    category_bonus = {
-        "SHIP":     2.0,
-        "DECIDE":   1.5,
-        "SPEC":     1.0,
-        "BUILD":    0.5,
-        "RESEARCH": 0.0,
-    }
-
-    today = datetime.now()
-    scored = []
-
-    for loop in loops:
-        score = float(loop.get("priority", 3))
-
-        cat = loop.get("category", "").upper()
-        score += category_bonus.get(cat, 0)
-
-        date_str = loop.get("importedAt") or loop.get("date", "")
-        if date_str:
-            try:
-                imported = datetime.fromisoformat(date_str[:10])
-                age_days = (today - imported).days
-                score += min(age_days * 0.5, 3.0)
-            except ValueError:
-                pass
-
-        scored.append((score, loop))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1]
+    return max(loops, key=score_loop)
 
 
-def get_random_position(screen_w: int, screen_h: int) -> tuple[int, int]:
-    """Return a random (x, y) that keeps the note fully on screen."""
-    max_x = screen_w - NOTE_WIDTH  - EDGE_PADDING
-    max_y = screen_h - NOTE_HEIGHT - EDGE_PADDING
-    x = random.randint(EDGE_PADDING, max(EDGE_PADDING, max_x))
-    y = random.randint(EDGE_PADDING, max(EDGE_PADDING, max_y))
-    return x, y
+# ── Sticky note window ─────────────────────────────────────────────────────────
+
+def split_action_into_steps(action: str) -> list[str]:
+    """
+    Try to extract steps from the action text.
+    Splits on common delimiters: numbered lists, semicolons, commas (if > 2 parts).
+    Falls back to a single step.
+    """
+    import re
+    # Numbered: "1. do x 2. do y"
+    numbered = re.split(r'\d+[\.\)]\s+', action.strip())
+    numbered = [s.strip() for s in numbered if s.strip()]
+    if len(numbered) >= 2:
+        return numbered
+
+    # Semicolons
+    semi = [s.strip() for s in action.split(';') if s.strip()]
+    if len(semi) >= 2:
+        return semi
+
+    # Commas with multiple meaningful chunks
+    comma = [s.strip() for s in action.split(',') if s.strip()]
+    if len(comma) >= 3:
+        return comma
+
+    # Single step — wrap it
+    return [action.strip()]
 
 
-def show_note(loop: dict):
-    """Render the sticky note window."""
+def show_note(loop: dict, theme: dict) -> None:
+    greeting = random.choice(GREETINGS)
+    category = loop.get("category", "").upper()
+    hint = CATEGORY_HINTS.get(category, DEFAULT_HINT)
+    action = loop.get("action", "No action defined.")
+    context = loop.get("context", "").strip()
+    topic = loop.get("topic", "")
+    project = loop.get("project", "")
+    priority = loop.get("priority", 1)
+    steps = split_action_into_steps(action)
+
+    # ── Root window ──────────────────────────────────────────────────────────
     root = tk.Tk()
-    root.overrideredirect(True)
+    root.overrideredirect(True)          # no OS chrome
     root.attributes("-topmost", True)
-    root.attributes("-alpha", 0.96)
+    root.attributes("-alpha", 0.97)
+    root.configure(bg=theme["bg"])
+    root.resizable(True, True)
 
-    screen_w = root.winfo_screenwidth()
-    screen_h = root.winfo_screenheight()
-    x, y = get_random_position(screen_w, screen_h)
+    # Position: random spot avoiding edges
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    win_w, win_h = 420, 320
+    x = random.randint(80, max(81, sw - win_w - 80))
+    y = random.randint(80, max(81, sh - win_h - 200))
+    root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+    root.minsize(320, 240)
 
-    root.geometry(f"{NOTE_WIDTH}x{NOTE_HEIGHT}+{x}+{y}")
-    root.configure(bg=BG_COLOR)
+    # ── Drag state ───────────────────────────────────────────────────────────
+    _drag = {"x": 0, "y": 0}
 
-    try:
-        header_font  = tkfont.Font(family="Consolas", size=9,  weight="normal")
-        body_font    = tkfont.Font(family="Consolas", size=11, weight="bold")
-        meta_font    = tkfont.Font(family="Consolas", size=8)
-        dismiss_font = tkfont.Font(family="Consolas", size=8)
-    except Exception:
-        header_font  = tkfont.Font(size=9)
-        body_font    = tkfont.Font(size=11, weight="bold")
-        meta_font    = tkfont.Font(size=8)
-        dismiss_font = tkfont.Font(size=8)
+    def on_drag_start(event):
+        _drag["x"] = event.x_root - root.winfo_x()
+        _drag["y"] = event.y_root - root.winfo_y()
 
-    top_bar = tk.Frame(root, bg=BG_SHADOW, height=6)
-    top_bar.pack(fill="x", side="top")
+    def on_drag_motion(event):
+        root.geometry(f"+{event.x_root - _drag['x']}+{event.y_root - _drag['y']}")
 
-    frame = tk.Frame(root, bg=BG_COLOR, padx=16, pady=10)
-    frame.pack(fill="both", expand=True)
+    # ── Resize state (bottom-right grip) ─────────────────────────────────────
+    _resize = {"x": 0, "y": 0, "w": 0, "h": 0}
 
-    project  = loop.get("project",  "")
-    category = loop.get("category", "")
-    priority = loop.get("priority", "")
-    header_text = f"{project}  ·  {category}  ·  P{priority}"
+    def on_resize_start(event):
+        _resize["x"] = event.x_root
+        _resize["y"] = event.y_root
+        _resize["w"] = root.winfo_width()
+        _resize["h"] = root.winfo_height()
 
-    header_label = tk.Label(frame, text=header_text, font=header_font,
-                            bg=BG_COLOR, fg=META_COLOR, anchor="w")
-    header_label.pack(fill="x", pady=(0, 6))
+    def on_resize_motion(event):
+        new_w = max(320, _resize["w"] + (event.x_root - _resize["x"]))
+        new_h = max(240, _resize["h"] + (event.y_root - _resize["y"]))
+        root.geometry(f"{new_w}x{new_h}")
 
-    action = loop.get("action", "No action found.")
-    action_label = tk.Label(frame, text=action, font=body_font, bg=BG_COLOR,
-                            fg=TEXT_COLOR, anchor="w", justify="left",
-                            wraplength=NOTE_WIDTH - 40)
-    action_label.pack(fill="x")
+    # ── Header (draggable) ───────────────────────────────────────────────────
+    header = tk.Frame(root, bg=theme["header"], cursor="fleur")
+    header.pack(fill="x")
 
-    dismiss_label = tk.Label(frame, text="click anywhere to dismiss",
-                             font=dismiss_font, bg=BG_COLOR, fg=DISMISS_COLOR, anchor="e")
-    dismiss_label.pack(fill="x", side="bottom", pady=(6, 0))
+    header_inner = tk.Frame(header, bg=theme["header"])
+    header_inner.pack(fill="x", padx=10, pady=(8, 6))
 
-    def dismiss(event=None):
-        root.destroy()
+    day_label = tk.Label(
+        header_inner,
+        text=f"The Note  ·  {theme['label']}",
+        bg=theme["header"],
+        fg=theme["accent"],
+        font=("Segoe UI", 9, "bold"),
+        anchor="w",
+    )
+    day_label.pack(side="left")
 
-    for widget in [root, frame, top_bar, header_label, action_label, dismiss_label]:
-        widget.bind("<Button-1>", dismiss)
+    close_btn = tk.Label(
+        header_inner,
+        text="  ×  ",
+        bg=theme["header"],
+        fg=theme["accent"],
+        font=("Segoe UI", 13, "bold"),
+        cursor="hand2",
+    )
+    close_btn.pack(side="right")
+    close_btn.bind("<Button-1>", lambda e: root.destroy())
 
+    # Drag bindings — header only
+    for widget in (header, header_inner, day_label):
+        widget.bind("<ButtonPress-1>", on_drag_start)
+        widget.bind("<B1-Motion>", on_drag_motion)
+
+    # ── Body ─────────────────────────────────────────────────────────────────
+    body = tk.Frame(root, bg=theme["bg"])
+    body.pack(fill="both", expand=True, padx=14, pady=(10, 6))
+
+    # Greeting
+    greet_lbl = tk.Label(
+        body,
+        text=greeting,
+        bg=theme["bg"],
+        fg=theme["accent"],
+        font=("Segoe UI", 11, "italic"),
+        wraplength=380,
+        justify="left",
+        anchor="w",
+    )
+    greet_lbl.pack(fill="x", pady=(0, 8))
+
+    # Divider
+    div = tk.Frame(body, bg=theme["header"], height=1)
+    div.pack(fill="x", pady=(0, 8))
+
+    # Meta row: project · category · priority
+    meta_parts = []
+    if project:
+        meta_parts.append(project)
+    if category:
+        meta_parts.append(category)
+    meta_parts.append(f"P{priority}")
+    meta_text = "  ·  ".join(meta_parts)
+
+    meta_lbl = tk.Label(
+        body,
+        text=meta_text,
+        bg=theme["bg"],
+        fg=theme["text"],
+        font=("Consolas", 8),
+        anchor="w",
+        opacity=0,   # ignored — just styling
+    )
+    meta_lbl.configure(fg="#888888")
+    meta_lbl.pack(fill="x", pady=(0, 4))
+
+    # Topic / title
+    if topic:
+        topic_lbl = tk.Label(
+            body,
+            text=topic,
+            bg=theme["bg"],
+            fg=theme["text"],
+            font=("Segoe UI", 10, "bold"),
+            wraplength=380,
+            justify="left",
+            anchor="w",
+        )
+        topic_lbl.pack(fill="x", pady=(0, 4))
+
+    # Action text
+    action_lbl = tk.Label(
+        body,
+        text=action,
+        bg=theme["bg"],
+        fg=theme["text"],
+        font=("Consolas", 10),
+        wraplength=380,
+        justify="left",
+        anchor="w",
+    )
+    action_lbl.pack(fill="x", pady=(0, 6))
+
+    # ── Expandable steps section ──────────────────────────────────────────────
+    steps_visible = tk.BooleanVar(value=False)
+    steps_frame = tk.Frame(body, bg=theme["bg"])
+
+    def build_steps_frame():
+        for w in steps_frame.winfo_children():
+            w.destroy()
+
+        hint_lbl = tk.Label(
+            steps_frame,
+            text=hint,
+            bg=theme["bg"],
+            fg=theme["accent"],
+            font=("Segoe UI", 9, "italic"),
+            wraplength=370,
+            justify="left",
+            anchor="w",
+        )
+        hint_lbl.pack(fill="x", pady=(0, 4))
+
+        for i, step in enumerate(steps, 1):
+            step_lbl = tk.Label(
+                steps_frame,
+                text=f"  {i}.  {step}",
+                bg=theme["bg"],
+                fg=theme["text"],
+                font=("Consolas", 9),
+                wraplength=360,
+                justify="left",
+                anchor="w",
+            )
+            step_lbl.pack(fill="x", pady=1)
+
+        if context:
+            ctx_div = tk.Frame(steps_frame, bg=theme["header"], height=1)
+            ctx_div.pack(fill="x", pady=(6, 4))
+            ctx_lbl = tk.Label(
+                steps_frame,
+                text=context,
+                bg=theme["bg"],
+                fg="#888888",
+                font=("Segoe UI", 8, "italic"),
+                wraplength=370,
+                justify="left",
+                anchor="w",
+            )
+            ctx_lbl.pack(fill="x")
+
+    def toggle_steps():
+        if steps_visible.get():
+            steps_frame.pack_forget()
+            steps_visible.set(False)
+            toggle_btn.config(text="▸ how to start")
+        else:
+            build_steps_frame()
+            steps_frame.pack(fill="x", pady=(4, 0))
+            steps_visible.set(True)
+            toggle_btn.config(text="▾ how to start")
+
+    # Only show toggle if there's something to expand
+    show_toggle = len(steps) >= 2 or context or True  # always show — context/hint always useful
+    if show_toggle:
+        toggle_btn = tk.Label(
+            body,
+            text="▸ how to start",
+            bg=theme["bg"],
+            fg=theme["accent"],
+            font=("Segoe UI", 9, "underline"),
+            cursor="hand2",
+            anchor="w",
+        )
+        toggle_btn.pack(fill="x", pady=(0, 2))
+        toggle_btn.bind("<Button-1>", lambda e: toggle_steps())
+
+    # ── Resize grip (bottom-right corner) ────────────────────────────────────
+    grip = tk.Label(root, text="⊿", bg=theme["bg"], fg=theme["header"],
+                    font=("Segoe UI", 9), cursor="size_nw_se")
+    grip.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
+    grip.bind("<ButtonPress-1>", on_resize_start)
+    grip.bind("<B1-Motion>", on_resize_motion)
+
+    # ── Fade in ───────────────────────────────────────────────────────────────
     root.attributes("-alpha", 0.0)
 
-    def fade_in(alpha: float = 0.0):
-        alpha = min(alpha + 0.06, 0.96)
+    def fade_in(alpha=0.0):
+        alpha = min(alpha + 0.07, 0.97)
         root.attributes("-alpha", alpha)
-        if alpha < 0.96:
+        if alpha < 0.97:
             root.after(16, fade_in, alpha)
 
     root.after(50, fade_in)
     root.mainloop()
 
 
+def show_fallback_note(theme: dict) -> None:
+    greeting = random.choice(GREETINGS)
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.attributes("-alpha", 0.95)
+    root.configure(bg=theme["bg"])
+
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    win_w, win_h = 380, 180
+    x = random.randint(80, max(81, sw - win_w - 80))
+    y = random.randint(80, max(81, sh - win_h - 200))
+    root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+
+    _drag = {"x": 0, "y": 0}
+
+    def on_drag_start(event):
+        _drag["x"] = event.x_root - root.winfo_x()
+        _drag["y"] = event.y_root - root.winfo_y()
+
+    def on_drag_motion(event):
+        root.geometry(f"+{event.x_root - _drag['x']}+{event.y_root - _drag['y']}")
+
+    header = tk.Frame(root, bg=theme["header"], cursor="fleur")
+    header.pack(fill="x")
+    header_inner = tk.Frame(header, bg=theme["header"])
+    header_inner.pack(fill="x", padx=10, pady=(8, 6))
+
+    tk.Label(header_inner, text=f"The Note  ·  {theme['label']}",
+             bg=theme["header"], fg=theme["accent"],
+             font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left")
+    close_btn = tk.Label(header_inner, text="  ×  ",
+                         bg=theme["header"], fg=theme["accent"],
+                         font=("Segoe UI", 13, "bold"), cursor="hand2")
+    close_btn.pack(side="right")
+    close_btn.bind("<Button-1>", lambda e: root.destroy())
+
+    header.bind("<ButtonPress-1>", on_drag_start)
+    header.bind("<B1-Motion>", on_drag_motion)
+    header_inner.bind("<ButtonPress-1>", on_drag_start)
+    header_inner.bind("<B1-Motion>", on_drag_motion)
+
+    body = tk.Frame(root, bg=theme["bg"])
+    body.pack(fill="both", expand=True, padx=14, pady=10)
+
+    tk.Label(body, text=greeting, bg=theme["bg"], fg=theme["accent"],
+             font=("Segoe UI", 11, "italic"), wraplength=340,
+             justify="left", anchor="w").pack(fill="x", pady=(0, 8))
+
+    tk.Label(body, text="No open loops found today. :)",
+             bg=theme["bg"], fg=theme["text"],
+             font=("Segoe UI", 10), anchor="w").pack(fill="x")
+
+    tk.Label(body, text="Enjoy a lighter morning. You earned it.",
+             bg=theme["bg"], fg="#888888",
+             font=("Segoe UI", 9, "italic"), anchor="w").pack(fill="x")
+
+    root.attributes("-alpha", 0.0)
+
+    def fade_in(alpha=0.0):
+        alpha = min(alpha + 0.07, 0.95)
+        root.attributes("-alpha", alpha)
+        if alpha < 0.95:
+            root.after(16, fade_in, alpha)
+
+    root.after(50, fade_in)
+    root.mainloop()
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
 def main():
+    today = datetime.now().weekday()   # Monday=0, Sunday=6
+    theme = DAY_THEMES[today]
+
     loops = load_loops()
+    top = pick_top_loop(loops)
 
-    if not loops:
-        # Silent fail — don't interrupt the morning
-        sys.exit(0)
-
-    loop = pick_loop(loops)
-    if loop:
-        show_note(loop)
+    if top:
+        show_note(top, theme)
+    else:
+        show_fallback_note(theme)
 
 
 if __name__ == "__main__":
